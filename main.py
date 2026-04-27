@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import List
 import threading
 import queue
+import time
 
 app = FastAPI(title="视频识别服务")
 
@@ -21,7 +22,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # 全局变量
-rtsp_url = "rtsp://admin:password@192.168.2.234:554/h264/ch1/main/av_stream"
+# 记得更改为自己的rtsp视频流url，格式通常为：rtsp://用户名:密码@IP地址:端口/路径
+# 如果使用本地摄像头，请设置为"0"或"1"这类索引字符串
+rtsp_url = "0"
 connected_websockets: List[WebSocket] = []
 frame_queue = queue.Queue(maxsize=10)
 recognition_results = []
@@ -79,7 +82,7 @@ def send_to_model(image_base64):
     """发送图像到大模型进行识别"""
     try:
         response = ollama.chat(
-            model='qwen2.5vl:7b',
+            model='qwen2.5vl:3b',
             messages=[{
                 'role': 'user',
                 'content': '详细描述这张图片中的内容',
@@ -164,18 +167,29 @@ def generate_frames():
 def capture_rtsp_stream():
     """捕获RTSP视频流"""
     while True:  # 添加外层循环以支持重连
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        source = rtsp_url
+        if isinstance(source, str) and source.isdigit():
+            camera_index = int(source)
+            source_desc = f"本地摄像头({camera_index})"
+            # Windows优先尝试DirectShow，失败后回退到默认后端。
+            cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(camera_index)
+        else:
+            source_desc = f"RTSP流({source})"
+            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
         
         if not cap.isOpened():
-            print("无法打开 RTSP 流，5秒后重试...")
-            cv2.waitKey(5000)
+            print(f"无法打开视频源 {source_desc}，5秒后重试...")
+            time.sleep(5)
             continue
 
         frame_skip = 10  # 跳帧参数
         frame_count = 0
         executor = ThreadPoolExecutor(max_workers=1)
 
-        print("开始捕获视频流...")
+        print(f"开始捕获视频流: {source_desc}")
 
         while True:
             ret, frame = cap.read()
@@ -204,8 +218,8 @@ def capture_rtsp_stream():
                 executor.submit(send_to_model, image_base64)
 
         cap.release()
-        print("RTSP连接断开，5秒后重试...")
-        cv2.waitKey(5000)
+        print(f"视频源断开: {source_desc}，5秒后重试...")
+        time.sleep(5)
 
 def generate_frames():
     """生成视频帧用于HTTP流"""
@@ -246,7 +260,7 @@ def generate_frames():
 @app.get("/")
 async def index(request: Request):
     """主页面"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(name="index.html", request=request)
 
 @app.get("/video_feed")
 async def video_feed():
